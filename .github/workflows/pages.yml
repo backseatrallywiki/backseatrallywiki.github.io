@@ -1,0 +1,124 @@
+name: Build and deploy site
+on:
+  push:
+    branches: [main, qa/migration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: backseat-wiki-pages
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate pages, URLs and metadata
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, xml.etree.ElementTree as ET
+          root=Path('.')
+          paths=['','codes/','cars/','stages/','credits-xp/','co-driver/']
+          domain='https://backseatrallywiki.github.io'
+          for route in paths:
+              path=root/route/'index.html'
+              h=path.read_text()
+              expected=domain+'/'+route
+              assert h.count('<h1>')==1, (route,'H1')
+              assert '<link rel="canonical" href="'+expected+'"' in h,(route,'canonical')
+              assert 'og:url" content="'+expected+'"' in h,(route,'og:url')
+              assert 'application/ld+json' in h,(route,'schema')
+              assert 'G-FMDZDQ8BN4' in h,(route,'GA4')
+              for sub in ['codes/','cars/','stages/','credits-xp/','co-driver/']:
+                  assert 'href="/'+sub+'"' in h,(route,sub)
+              assert '<meta name="robots" content="index' in h,(route,'robots')
+              assert len(re.findall(r'<h2\b',h))>=5,(route,'sections')
+              assert len(re.findall(r'<title>(.*?)</title>',h))==1
+              title=re.search(r'<title>(.*?)</title>',h).group(1)
+              desc=re.search(r'<meta name="description" content="(.*?)"',h).group(1)
+              assert len(title)<=60,(route,'title',len(title))
+              assert len(desc)<=160,(route,'description',len(desc))
+              print('PASS page',expected,'title',len(title),'description',len(desc))
+          sitemap=(root/'sitemap.xml').read_text()
+          robots=(root/'robots.txt').read_text()
+          assert robots.strip().endswith(domain+'/sitemap.xml')
+          for route in paths:
+              assert f'<loc>{domain}/{route}</loc>' in sitemap
+          ET.fromstring(sitemap)
+          for needle in ['AGENTS.md','立项交接','Yorich 深度分析','api_key','secret_key']:
+              for path in root.rglob('*.html'):
+                  assert needle not in path.read_text(),(path,needle)
+          print('PASS full static SEO validation')
+          PY
+      - name: Chrome responsive and tool smoke test
+        run: |
+          cat > __qa__.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"><title>QA</title></head><body><main id="status">PENDING</main><script>
+          const routes=['/','/codes/','/cars/','/stages/','/credits-xp/','/co-driver/'];
+          const cases=routes.flatMap(path=>[390,768,1024,1440].map(width=>({path,width})));
+          Promise.all(cases.map(({path,width})=>new Promise(resolve=>{
+            const f=document.createElement('iframe');f.style.width=width+'px';f.style.height='900px';f.style.border='none';f.src=path;document.body.appendChild(f);
+            f.onload=()=>{try{
+              const d=f.contentDocument;
+              const html=d.documentElement;
+              const main=d.querySelector('.article-container')?.getBoundingClientRect();
+              const left=d.querySelector('.hero-copy')?.getBoundingClientRect();
+              const right=d.querySelector('.hero-art')?.getBoundingClientRect();
+              const nav=d.querySelector('.primary-nav');
+              const h1=d.querySelectorAll('h1').length;
+              const visible=nav&&f.contentWindow.getComputedStyle(nav).display!=='none';
+              let structure=path==='/' ? !!left&&!!right : !!main&&main.width<=1102&&main.left>=8;
+              if(path==='/'){
+                 if(width>=1024)structure=structure&&right.left>=left.right-8;
+                 else structure=structure&&right.top>=left.bottom-8;
+              }
+              const ok=html.scrollWidth<=width+2&&h1===1&&visible&&structure;
+              resolve({path,width,ok,scroll:html.scrollWidth,structure,h1});
+            }catch(e){resolve({path,width,ok:false,error:String(e)})}};
+            setTimeout(()=>resolve({path,width,ok:false,timeout:true}),12000);
+          }))).then(results=>{
+             const failures=results.filter(x=>!x.ok);
+             document.getElementById('status').textContent=failures.length?'FAIL BRQA '+JSON.stringify(failures):'PASS BRQA 24';
+          });</script></body></html>
+          HTML
+          python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/qa-server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" || true' EXIT
+          sleep 2
+          google-chrome --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom http://127.0.0.1:8765/__qa__.html > /tmp/qa-result.html 2>/tmp/qa-chrome.err
+          grep -q 'PASS BRQA 24' /tmp/qa-result.html || { grep -o 'FAIL BRQA[^<]*' /tmp/qa-result.html || tail -30 /tmp/qa-chrome.err; exit 1; }
+          echo 'PASS: all 6 pages at 390, 768, 1024, 1440px'
+          rm __qa__.html
+      - name: Configure Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+      - name: Prepare public release files
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p dist
+          cp index.html 404.html robots.txt sitemap.xml site.webmanifest dist/
+          cp -R assets codes cars stages credits-xp co-driver dist/
+          touch dist/.nojekyll
+      - name: Upload GitHub Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

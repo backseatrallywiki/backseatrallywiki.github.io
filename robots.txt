@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://backseatrallywiki.github.io/sitemap.xml
