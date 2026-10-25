@@ -34,7 +34,9 @@ jobs:
               assert '<link rel="canonical" href="'+expected+'"' in h,(route,'canonical')
               assert 'og:url" content="'+expected+'"' in h,(route,'og:url')
               assert 'application/ld+json' in h,(route,'schema')
-              assert 'G-FMDZDQ8BN4' in h,(route,'GA4')
+              assert h.count('https://www.googletagmanager.com/gtag/js?id=G-0EK23CW2G6')==1,(route,'GA4 loader')
+              assert h.count("gtag('config','G-0EK23CW2G6')")==1,(route,'GA4 config')
+              assert 'G-FMDZDQ8BN4' not in h,(route,'old GA4 id')
               for sub in ['codes/','cars/','stages/','credits-xp/','co-driver/']:
                   assert 'href="/'+sub+'"' in h,(route,sub)
               assert '<meta name="robots" content="index' in h,(route,'robots')
@@ -54,6 +56,27 @@ jobs:
           for needle in ['AGENTS.md','立项交接','Yorich 深度分析','api_key','secret_key']:
               for path in root.rglob('*.html'):
                   assert needle not in path.read_text(),(path,needle)
+          ads=(root/'assets/ads.js').read_text()
+          original_keys=['a6e1ba11f7a8dd5dbc47f883f2501ff5','99943600c04a4d46ee7a5688b14731fe','6c8b74995acbfded7386f1fa703a79d0','94f274b97678fe2adf07b731e8e64f4b']
+          for key in original_keys: assert key in ads,('Missing provided Adsterra GET CODE',key)
+          for route in paths:
+              h=(root/route/'index.html').read_text()
+              assert h.count('data-adsterra-banner ')==1,(route,'Banner exactly once')
+              assert h.count('data-adsterra-native ')==1,(route,'Native exactly once')
+              assert h.count('src="/assets/ads.js"')==1,(route,'Shared ads loader exactly once')
+              assert 'bauval.org' not in h,(route,'No per-page Adsterra duplication')
+              hero=h.find('class="home-hero') if not route else h.find('class="article-hero')
+              banner=h.find('data-adsterra-banner ')
+              native=h.find('data-adsterra-native ')
+              assert 0<=hero<banner<native,(route,'Correct top-of-page ad order')
+              if not route:
+                  cards=h.find('class="guide-cards"')
+                  assert banner<cards<native,(route,'Native follows existing guides')
+              else:
+                  article=h.find('<article class="article-body"><h2')
+                  paragraph_end=h.find('</p>',article)
+                  assert banner<article<paragraph_end<native,(route,'Native follows first natural content paragraph')
+          print('PASS Adsterra official keys and static placements')
           print('PASS full static SEO validation')
           PY
       - name: Chrome responsive and tool smoke test
@@ -61,7 +84,7 @@ jobs:
           cat > __qa__.html <<'HTML'
           <!doctype html><html><head><meta charset="utf-8"><title>QA</title></head><body><main id="status">PENDING</main><script>
           const routes=['/','/codes/','/cars/','/stages/','/credits-xp/','/co-driver/'];
-          const cases=routes.flatMap(path=>[390,768,1024,1440].map(width=>({path,width})));
+          const cases=routes.flatMap(path=>[375,390,768,1024,1440].map(width=>({path,width})));
           Promise.all(cases.map(({path,width})=>new Promise(resolve=>{
             const f=document.createElement('iframe');f.style.width=width+'px';f.style.height='900px';f.style.border='none';f.src=path;document.body.appendChild(f);
             f.onload=()=>{try{
@@ -78,13 +101,26 @@ jobs:
                  if(width>=1024)structure=structure&&right.left>=left.right-8;
                  else structure=structure&&right.top>=left.bottom-8;
               }
-              const ok=html.scrollWidth<=width+2&&h1===1&&visible&&structure;
-              resolve({path,width,ok,scroll:html.scrollWidth,structure,h1});
+              const bannerSlots=d.querySelectorAll('[data-adsterra-banner]');
+              const nativeSlots=d.querySelectorAll('[data-adsterra-native]');
+              const adFrame=bannerSlots[0]?.querySelector('iframe');
+              const srcdoc=adFrame?.getAttribute('srcdoc')||'';
+              const isMobile=width<768;
+              const expectedKey=isMobile?'99943600c04a4d46ee7a5688b14731fe':'a6e1ba11f7a8dd5dbc47f883f2501ff5';
+              const forbiddenKey=isMobile?'a6e1ba11f7a8dd5dbc47f883f2501ff5':'99943600c04a4d46ee7a5688b14731fe';
+              const oneBanner=!!adFrame&&adFrame.width===String(isMobile?320:728)&&adFrame.height===String(isMobile?50:90)&&srcdoc.includes(expectedKey)&&!srcdoc.includes(forbiddenKey);
+              const oneNative=d.querySelectorAll('script[src="https://bauval.org/21/6c8b74995acbfded7386f1fa703a79d0"]').length===1;
+              const oneSocial=d.querySelectorAll('script[src="https://bauval.org/14/94f274b97678fe2adf07b731e8e64f4b"]').length===1;
+              const hero=d.querySelector(path==='/'?'.home-hero':'.article-hero');
+              const properBanner=hero?.nextElementSibling===bannerSlots[0];
+              const properNative=path==='/'?d.querySelector('#choose-guide')?.nextElementSibling===nativeSlots[0]:!!d.querySelector('.article-body>p+.ad-slot-native');
+              const ok=html.scrollWidth<=width+2&&h1===1&&visible&&structure&&bannerSlots.length===1&&nativeSlots.length===1&&oneBanner&&oneNative&&oneSocial&&properBanner&&properNative;
+              resolve({path,width,ok,scroll:html.scrollWidth,structure,h1,oneBanner,oneNative,oneSocial,properBanner,properNative});
             }catch(e){resolve({path,width,ok:false,error:String(e)})}};
             setTimeout(()=>resolve({path,width,ok:false,timeout:true}),12000);
           }))).then(results=>{
              const failures=results.filter(x=>!x.ok);
-             document.getElementById('status').textContent=failures.length?'FAIL BRQA '+JSON.stringify(failures):'PASS BRQA 24';
+             document.getElementById('status').textContent=failures.length?'FAIL BRQA '+JSON.stringify(failures):'PASS BRQA 30';
           });</script></body></html>
           HTML
           python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/qa-server.log 2>&1 &
@@ -92,8 +128,8 @@ jobs:
           trap 'kill "$server" || true' EXIT
           sleep 2
           google-chrome --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom http://127.0.0.1:8765/__qa__.html > /tmp/qa-result.html 2>/tmp/qa-chrome.err
-          grep -q 'PASS BRQA 24' /tmp/qa-result.html || { grep -o 'FAIL BRQA[^<]*' /tmp/qa-result.html || tail -30 /tmp/qa-chrome.err; exit 1; }
-          echo 'PASS: all 6 pages at 390, 768, 1024, 1440px'
+          grep -q 'PASS BRQA 30' /tmp/qa-result.html || { grep -o 'FAIL BRQA[^<]*' /tmp/qa-result.html || tail -30 /tmp/qa-chrome.err; exit 1; }
+          echo 'PASS: responsive and ads QA all 6 pages at 375, 390, 768, 1024, 1440px'
           rm __qa__.html
       - name: Configure Pages
         if: github.ref == 'refs/heads/main'
