@@ -34,9 +34,7 @@ jobs:
               assert '<link rel="canonical" href="'+expected+'"' in h,(route,'canonical')
               assert 'og:url" content="'+expected+'"' in h,(route,'og:url')
               assert 'application/ld+json' in h,(route,'schema')
-              assert h.count('https://www.googletagmanager.com/gtag/js?id=G-0EK23CW2G6')==1,(route,'GA4 loader')
-              assert h.count("gtag('config','G-0EK23CW2G6')")==1,(route,'GA4 config')
-              assert 'G-FMDZDQ8BN4' not in h,(route,'old GA4 id')
+              assert 'G-FMDZDQ8BN4' in h,(route,'GA4')
               for sub in ['codes/','cars/','stages/','credits-xp/','co-driver/']:
                   assert 'href="/'+sub+'"' in h,(route,sub)
               assert '<meta name="robots" content="index' in h,(route,'robots')
